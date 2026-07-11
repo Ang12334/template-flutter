@@ -1,0 +1,15 @@
+name: chronos_apex
+description: The Chronos Apex Productivity Hub.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_serial_communication: ^0.0.3
+
+flutter:
+  uses-material-design: true
