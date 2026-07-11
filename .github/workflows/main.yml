@@ -22,8 +22,8 @@ jobs:
           channel: 'stable'
           flutter-version: '3.10.0'
 
-      - name: Generate Android Workspace
-        run: flutter create --platforms android .
+      - name: Generate Android Workspace (Force Overwrite)
+        run: flutter create --force --platforms android .
 
       - name: Set Hardware Minimum SDK
         run: sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 23/g' android/app/build.gradle
