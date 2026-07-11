@@ -21,16 +21,18 @@ jobs:
           channel: 'stable'
           flutter-version: '3.19.0'
 
-      - name: Auto Create Android Structure
-        run: flutter create --platforms android .
+      - name: Construct Base Target Directory
+        run: |
+          flutter create --platforms android .
+          rm -rf test
 
-      - name: Fetch Dependencies
+      - name: Fetch Core Libraries
         run: flutter pub get
 
-      - name: Compile Production APK
-        run: flutter build apk --release
+      - name: Assemble Production Release
+        run: flutter build apk --release --no-pub
 
-      - name: Upload APK Artifact
+      - name: Export Output Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Chronos-Apex-App
