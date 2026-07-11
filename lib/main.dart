@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter_serial_communication/flutter_serial_communication.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
 void main() => runApp(const ChronosApexApp());
 
@@ -38,11 +39,12 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final _serialComm = FlutterSerialCommunication();
-  List<DeviceInfo> _devicesList = [];
-  DeviceInfo? _selectedDevice;
+  BluetoothConnection? _connection;
+  List<BluetoothDevice> _devicesList = [];
+  BluetoothDevice? _selectedDevice;
   bool _isConnected = false;
   bool _isConnecting = false;
+  String _buffer = '';
 
   final List<String> _taskQueue = [
     'Complete Systems Hardware Spec',
@@ -55,7 +57,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _completedTasksCount = 0;
   int _cumulativeFocusSeconds = 0;
   String _currentHardwareState = 'DISCONNECTED';
-  StreamSubscription? _serialSubscription;
 
   @override
   void initState() {
@@ -65,33 +66,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   void dispose() {
-    _serialSubscription?.cancel();
+    _connection?.dispose();
     _taskController.dispose();
     super.dispose();
   }
 
   Future<void> _scanForDevices() async {
     try {
-      List<DeviceInfo> devices = await _serialComm.getAvailableDevices();
+      List<BluetoothDevice> devices = await FlutterBluetoothSerial.instance.getBondedDevices();
       setState(() => _devicesList = devices);
     } catch (e) {
-      _notify('Device Scan Error');
+      _notify('Bluetooth Initialization Failed');
     }
   }
 
   Future<void> _toggleConnect() async {
     if (_isConnected) {
-      await _serialComm.disconnect();
-      _serialSubscription?.cancel();
-      setState(() {
-        _isConnected = false;
-        _selectedDevice = null;
-        _currentHardwareState = 'DISCONNECTED';
-      });
+      await _connection?.close();
       return;
     }
     if (_selectedDevice == null) {
-      _notify('Select your paired hardware port first');
+      _notify('Please select your HC-05 console first');
       return;
     }
 
@@ -101,55 +96,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
 
     try {
-      bool connected = await _serialComm.connect(_selectedDevice!, 9600);
-      if (connected) {
+      BluetoothConnection connection = await BluetoothConnection.toAddress(_selectedDevice!.address);
+      setState(() {
+        _connection = connection;
+        _isConnected = true;
+        _isConnecting = false;
+        _currentHardwareState = 'CONNECTED';
+      });
+      _notify('Chronos Apex Hardware Linked');
+      
+      _connection!.input!.listen(_onDataReceived).onDone(() {
         setState(() {
-          _isConnected = true;
-          _isConnecting = false;
-          _currentHardwareState = 'CONNECTED';
+          _isConnected = false;
+          _connection = null;
+          _currentHardwareState = 'DISCONNECTED';
         });
-        _notify('Hardware Linked Successfully');
+        _notify('Console Connection Terminated');
+      });
 
-        _serialSubscription = _serialComm.getSerialDataStream().listen((data) {
-          String packet = utf8.decode(data).trim();
-          if (packet.isNotEmpty) _handleProtocolPacket(packet);
-        });
-
-        _syncHardwareOLED();
-      } else {
-        throw Exception();
-      }
+      _syncHardwareOLED();
     } catch (e) {
       setState(() {
         _isConnecting = false;
         _isConnected = false;
         _currentHardwareState = 'LINK ERROR';
       });
-      _notify('Connection Failed');
+      _notify('Connection Failed. Check Console Power.');
+    }
+  }
+
+  void _onDataReceived(Uint8List data) {
+    _buffer += utf8.decode(data);
+    while (_buffer.contains('\n')) {
+      int index = _buffer.indexOf('\n');
+      String packet = _buffer.substring(0, index).trim();
+      _buffer = _buffer.substring(index + 1);
+      if (packet.isNotEmpty) _handleProtocolPacket(packet);
     }
   }
 
   void _handleProtocolPacket(String packet) {
     setState(() {
-      if (packet.contains('TASK:DONE')) {
+      if (packet == 'TASK:DONE') {
         if (_taskQueue.isNotEmpty) {
           _taskQueue.removeAt(0);
           _completedTasksCount++;
           _syncHardwareOLED();
         }
-      } else if (packet.contains('STAT:FOCUS')) {
+      } else if (packet == 'STAT:FOCUS') {
         _currentHardwareState = 'FOCUS BLOCK ACTIVE';
-      } else if (packet.contains('STAT:BREAK')) {
+      } else if (packet == 'STAT:BREAK') {
         _currentHardwareState = 'BREAK PERIOD';
         _cumulativeFocusSeconds += 1500;
       }
     });
   }
 
-  void _syncHardwareOLED() async {
-    if (!_isConnected) return;
-    String cmd = _taskQueue.isNotEmpty ? 'NEXT:${_taskQueue.first}\n' : 'NEXT:No Active Tasks\n';
-    await _serialComm.writeString(cmd);
+  void _syncHardwareOLED() {
+    if (!_isConnected || _connection == null) return;
+    String cmd = _taskQueue.isNotEmpty ? 'NEXT:${_taskQueue.first}' : 'NEXT:No Active Tasks';
+    _connection!.output.add(utf8.encode('$cmd\n'));
   }
 
   void _addTask() {
@@ -178,12 +184,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  void _notify(String message) {
+  void _notify(String fallbackMessage) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(message, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+        content: Text(fallbackMessage, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF00E5FF),
         behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 3),
       ),
     );
   }
@@ -209,11 +216,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     decoration: BoxDecoration(color: const Color(0xFF0A0A0E), borderRadius: BorderRadius.circular(8)),
                     child: DropdownButtonHideUnderline(
-                      child: DropdownButton<DeviceInfo>(
+                      child: DropdownButton<BluetoothDevice>(
                         isExpanded: true,
                         hint: const Text('Select System Hardware Port'),
                         value: _selectedDevice,
-                        items: _devicesList.map((d) => DropdownMenuItem(value: d, child: Text(d.deviceName))).toList(),
+                        items: _devicesList.map((d) => DropdownMenuItem(value: d, child: Text(d.name ?? d.address))).toList(),
                         onChanged: _isConnected ? null : (val) => setState(() => _selectedDevice = val),
                       ),
                     ),
@@ -257,7 +264,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Expanded(
                       child: TextField(
                         controller: _taskController,
-                        decoration: const InputDecoration(hintText: 'Queue next priority...', border: InputBorder.none),
+                        decoration: const InputDecoration(hintText: 'Queue next high-value priority...', border: InputBorder.none),
                         onSubmitted: (_) => _addTask(),
                       ),
                     ),
@@ -292,7 +299,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             child: Text('${index + 1}', style: const TextStyle(fontWeight: FontWeight.bold)),
                           ),
                           title: Text(_taskQueue[index], style: TextStyle(fontWeight: isTop ? FontWeight.bold : FontWeight.normal)),
-                          subtitle: isTop ? const Text('STREAMING TO CONSOLE OLED', style: TextStyle(fontSize: 10, color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)) : null,
+                          subtitle: isTop ? const Text('STREAMING TO PRODUCTION OLED', style: TextStyle(fontSize: 10, color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)) : null,
                           trailing: IconButton(
                             icon: const Icon(Icons.clear, color: Colors.white38, size: 20),
                             onPressed: () => _removeTask(index),
