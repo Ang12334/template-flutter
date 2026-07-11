@@ -7,7 +7,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -21,19 +22,27 @@ jobs:
           channel: 'stable'
           flutter-version: '3.19.0'
 
-      - name: Construct Base Target Directory
+      - name: Sandbox Assembly & SDK Bump
         run: |
-          flutter create --platforms android .
-          rm -rf test
+          # 1. Create a pristine, error-free project folder
+          flutter create --project-name chronos_apex --org com.chronos.apex pristine_app
+          
+          # 2. Inject your perfectly written code files
+          cp pubspec.yaml pristine_app/
+          cp lib/main.dart pristine_app/lib/
+          
+          # 3. Enter the sandbox
+          cd pristine_app
+          
+          # 4. Force the Android SDK minimum to support hardware communication
+          sed -i 's/flutter.minSdkVersion/23/g' android/app/build.gradle
+          
+          # 5. Fetch dependencies and compile
+          flutter pub get
+          flutter build apk --release
 
-      - name: Fetch Core Libraries
-        run: flutter pub get
-
-      - name: Assemble Production Release
-        run: flutter build apk --release --no-pub
-
-      - name: Export Output Artifact
+      - name: Upload Production APK
         uses: actions/upload-artifact@v4
         with:
           name: Chronos-Apex-App
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: pristine_app/build/app/outputs/flutter-apk/app-release.apk
