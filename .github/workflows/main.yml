@@ -22,43 +22,31 @@ jobs:
           channel: 'stable'
           flutter-version: '3.19.0'
 
-      - name: Construct Pristine Environment
+      - name: Assemble Pristine Build
         run: |
-          # 1. Create the project structure from scratch
+          # 1. Generate clean environment
           flutter create --project-name chronos_apex --org com.chronos.apex pristine_app
           cd pristine_app
           
-          # 2. Force the minimum SDK level to support hardware communication
+          # 2. Force hardware API levels
           sed -i 's/flutter.minSdkVersion/23/g' android/app/build.gradle
           
-          # 3. Overwrite pubspec.yaml directly inside the folder
-          cat << 'EOF' > pubspec.yaml
-          name: chronos_apex
-          description: The Chronos Apex Productivity Hub.
-          publish_to: 'none'
-          version: 1.0.0+1
-          environment:
-            sdk: '>=3.0.0 <4.0.0'
-          dependencies:
-            flutter:
-              sdk: flutter
-            flutter_serial_communication: ^0.0.3
-          flutter:
-            uses-material-design: true
-          EOF
+          # 3. Add Bluetooth dependency natively (Bypasses all YAML spacing errors)
+          flutter pub add flutter_blue_classic
           
-          # 4. Overwrite main.dart directly inside the folder
+          # 4. Inject the final HC-05 Bluetooth App Logic
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:convert';
+          import 'dart:typed_data';
           import 'package:flutter/material.dart';
-          import 'package:flutter_serial_communication/flutter_serial_communication.dart';
-
+          import 'package:flutter_blue_classic/flutter_blue_classic.dart';
+          
           void main() => runApp(const ChronosApexApp());
-
+          
           class ChronosApexApp extends StatelessWidget {
             const ChronosApexApp({super.key});
-
+          
             @override
             Widget build(BuildContext context) {
               return MaterialApp(
@@ -80,95 +68,100 @@ jobs:
               );
             }
           }
-
+          
           class DashboardScreen extends StatefulWidget {
             const DashboardScreen({super.key});
-
+          
             @override
             State<DashboardScreen> createState() => _DashboardScreenState();
           }
-
+          
           class _DashboardScreenState extends State<DashboardScreen> {
-            final _serialComm = FlutterSerialCommunication();
-            List<DeviceInfo> _devicesList = [];
-            DeviceInfo? _selectedDevice;
+            final _bluetooth = FlutterBlueClassic();
+            BluetoothConnection? _connection;
+            List<BluetoothDevice> _devicesList = [];
+            BluetoothDevice? _selectedDevice;
             bool _isConnected = false;
             bool _isConnecting = false;
-
+            String _buffer = '';
+          
             final List<String> _taskQueue = [
               'Complete Systems Hardware Spec',
               'Review Firmware Serial Protocol',
               'Integrate Mobile Stream Handlers',
               'Conduct Thermal & Signal Stress Test',
             ];
-
+          
             final TextEditingController _taskController = TextEditingController();
             int _completedTasksCount = 0;
             int _cumulativeFocusSeconds = 0;
             String _currentHardwareState = 'DISCONNECTED';
-            StreamSubscription? _serialSubscription;
-
+          
             @override
             void initState() {
               super.initState();
               _scanForDevices();
             }
-
+          
             @override
             void dispose() {
-              _serialSubscription?.cancel();
+              _connection?.close();
               _taskController.dispose();
               super.dispose();
             }
-
+          
             Future<void> _scanForDevices() async {
               try {
-                List<DeviceInfo> devices = await _serialComm.getAvailableDevices();
+                List<BluetoothDevice> devices = await _bluetooth.bondedDevices ?? [];
                 setState(() => _devicesList = devices);
               } catch (e) {
-                _notify('Device Scan Error');
+                _notify('Bluetooth Scan Error: $e');
               }
             }
-
+          
             Future<void> _toggleConnect() async {
               if (_isConnected) {
-                await _serialComm.disconnect();
-                _serialSubscription?.cancel();
+                await _connection?.close();
                 setState(() {
                   _isConnected = false;
-                  _selectedDevice = null;
+                  _connection = null;
                   _currentHardwareState = 'DISCONNECTED';
                 });
                 return;
               }
               if (_selectedDevice == null) {
-                _notify('Select your paired hardware port first');
+                _notify('Please select your HC-05 console first');
                 return;
               }
-
+          
               setState(() {
                 _isConnecting = true;
                 _currentHardwareState = 'PAIRING...';
               });
-
+          
               try {
-                bool connected = await _serialComm.connect(_selectedDevice!, 9600);
-                if (connected) {
+                BluetoothConnection? connection = await _bluetooth.connect(_selectedDevice!.address);
+                if (connection != null && connection.isConnected) {
                   setState(() {
+                    _connection = connection;
                     _isConnected = true;
                     _isConnecting = false;
                     _currentHardwareState = 'CONNECTED';
                   });
-                  _notify('Hardware Linked Successfully');
-
-                  _serialSubscription = _serialComm.getSerialDataStream().listen((data) {
-                    String packet = utf8.decode(data).trim();
-                    if (packet.isNotEmpty) _handleProtocolPacket(packet);
+                  _notify('Chronos Apex Hardware Linked');
+          
+                  _connection!.input?.listen(_onDataReceived).onDone(() {
+                    setState(() {
+                      _isConnected = false;
+                      _connection = null;
+                      _currentHardwareState = 'DISCONNECTED';
+                    });
+                    _notify('Console Connection Terminated');
                   });
-
+          
                   _syncHardwareOLED();
                 } else {
-                  throw Exception();
+                  throw Exception("Failed to open connection");
                 }
               } catch (e) {
                 setState(() {
@@ -176,33 +169,43 @@ jobs:
                   _isConnected = false;
                   _currentHardwareState = 'LINK ERROR';
                 });
-                _notify('Connection Failed');
+                _notify('Connection Failed. Check Console Power.');
               }
             }
-
+          
+            void _onDataReceived(Uint8List data) {
+              _buffer += utf8.decode(data);
+              while (_buffer.contains('\n')) {
+                int index = _buffer.indexOf('\n');
+                String packet = _buffer.substring(0, index).trim();
+                _buffer = _buffer.substring(index + 1);
+                if (packet.isNotEmpty) _handleProtocolPacket(packet);
+              }
+            }
+          
             void _handleProtocolPacket(String packet) {
               setState(() {
-                if (packet.contains('TASK:DONE')) {
+                if (packet == 'TASK:DONE') {
                   if (_taskQueue.isNotEmpty) {
                     _taskQueue.removeAt(0);
                     _completedTasksCount++;
                     _syncHardwareOLED();
                   }
-                } else if (packet.contains('STAT:FOCUS')) {
+                } else if (packet == 'STAT:FOCUS') {
                   _currentHardwareState = 'FOCUS BLOCK ACTIVE';
-                } else if (packet.contains('STAT:BREAK')) {
+                } else if (packet == 'STAT:BREAK') {
                   _currentHardwareState = 'BREAK PERIOD';
                   _cumulativeFocusSeconds += 1500;
                 }
               });
             }
-
-            void _syncHardwareOLED() async {
-              if (!_isConnected) return;
-              String cmd = _taskQueue.isNotEmpty ? 'NEXT:${_taskQueue.first}\n' : 'NEXT:No Active Tasks\n';
-              await _serialComm.writeString(cmd);
+          
+            void _syncHardwareOLED() {
+              if (!_isConnected || _connection == null) return;
+              String cmd = _taskQueue.isNotEmpty ? 'NEXT:${_taskQueue.first}' : 'NEXT:No Active Tasks';
+              _connection!.writeString('$cmd\n');
             }
-
+          
             void _addTask() {
               String text = _taskController.text.trim();
               if (text.isEmpty) return;
@@ -212,14 +215,14 @@ jobs:
                 if (_taskQueue.length == 1) _syncHardwareOLED();
               });
             }
-
+          
             void _removeTask(int index) {
               setState(() {
                 _taskQueue.removeAt(index);
                 if (index == 0) _syncHardwareOLED();
               });
             }
-
+          
             void _reorderTasks(int oldIndex, int newIndex) {
               setState(() {
                 if (newIndex > oldIndex) newIndex -= 1;
@@ -228,17 +231,18 @@ jobs:
                 if (oldIndex == 0 || newIndex == 0) _syncHardwareOLED();
               });
             }
-
+          
             void _notify(String message) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(message, style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
                   backgroundColor: const Color(0xFF00E5FF),
                   behavior: SnackBarBehavior.floating,
+                  duration: const Duration(seconds: 3),
                 ),
               );
             }
-
+          
             @override
             Widget build(BuildContext context) {
               return Scaffold(
@@ -260,11 +264,11 @@ jobs:
                               padding: const EdgeInsets.symmetric(horizontal: 12),
                               decoration: BoxDecoration(color: const Color(0xFF0A0A0E), borderRadius: BorderRadius.circular(8)),
                               child: DropdownButtonHideUnderline(
-                                child: DropdownButton<DeviceInfo>(
+                                child: DropdownButton<BluetoothDevice>(
                                   isExpanded: true,
                                   hint: const Text('Select System Hardware Port'),
                                   value: _selectedDevice,
-                                  items: _devicesList.map((d) => DropdownMenuItem(value: d, child: Text(d.deviceName))).toList(),
+                                  items: _devicesList.map((d) => DropdownMenuItem(value: d, child: Text(d.name ?? d.address))).toList(),
                                   onChanged: _isConnected ? null : (val) => setState(() => _selectedDevice = val),
                                 ),
                               ),
@@ -308,7 +312,7 @@ jobs:
                               Expanded(
                                 child: TextField(
                                   controller: _taskController,
-                                  decoration: const InputDecoration(hintText: 'Queue next priority...', border: InputBorder.none),
+                                  decoration: const InputDecoration(hintText: 'Queue next high-value priority...', border: InputBorder.none),
                                   onSubmitted: (_) => _addTask(),
                                 ),
                               ),
@@ -343,7 +347,7 @@ jobs:
                                       child: Text('${index + 1}', style: const TextStyle(fontWeight: FontWeight.bold)),
                                     ),
                                     title: Text(_taskQueue[index], style: TextStyle(fontWeight: isTop ? FontWeight.bold : FontWeight.normal)),
-                                    subtitle: isTop ? const Text('STREAMING TO CONSOLE OLED', style: TextStyle(fontSize: 10, color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)) : null,
+                                    subtitle: isTop ? const Text('STREAMING TO PRODUCTION OLED', style: TextStyle(fontSize: 10, color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)) : null,
                                     trailing: IconButton(
                                       icon: const Icon(Icons.clear, color: Colors.white38, size: 20),
                                       onPressed: () => _removeTask(index),
@@ -357,7 +361,7 @@ jobs:
                 ),
               );
             }
-
+          
             Widget _telemetryBox(String title, String value, Color valueColor) {
               return Expanded(
                 child: Container(
@@ -377,8 +381,7 @@ jobs:
           }
           EOF
           
-          # 5. Compile everything safely inside the generated folder
-          flutter pub get
+          # 5. Compile the APK
           flutter build apk --release
 
       - name: Upload Production APK
